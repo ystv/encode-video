@@ -1,6 +1,6 @@
 {
-  "src": "videos/source.mp4",
-  "dst": "videos/1080p.mp4",
+  "src": "source.mp4",
+  "dst": "1080p.mp4",
   "encodeName": "FHD 8Mbps",
-  "encodeArgs": "-vf scale=1920:1080 -c:v libx264 -crf 20 -preset slow -c:a copy"
+  "encodeArgs": "-vf scale=1920:1080 -c:v libx264 -crf 20 -preset slow -c:a copy -threads 0"
 }
