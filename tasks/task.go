@@ -185,7 +185,7 @@ func (m *Store) EncodeVideo(b64payload string) error {
 		return err
 	}
 
-	log.Printf("Finished encoding %s/%s - completed in %s", payload.Src, payload.EncodeName, time.Since(startDl))
+	log.Printf("Finished %s/%s - completed in %s", payload.Src, payload.EncodeName, time.Since(startDl))
 
 	return nil
 }
