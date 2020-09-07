@@ -8,15 +8,28 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
-// Payload the object that is used to communicate in the MQ
-type Payload struct {
-	Src        string `json:"src"`        // Location of source file on CDN
-	Dst        string `json:"dst"`        // Destination of finished encode on CDN
-	EncodeName string `json:"encodeName"` // Here for pretty logging
-	EncodeArgs string `json:"encodeArgs"` // Encode arguments
-}
+type (
+	// Payload the object that is used to communicate in the MQ
+	Payload struct {
+		Src        string `json:"src"`        // Location of source file on CDN
+		Dst        string `json:"dst"`        // Destination of finished encode on CDN
+		EncodeName string `json:"encodeName"` // Here for pretty logging
+		EncodeArgs string `json:"encodeArgs"` // Encode arguments
+	}
+	// Stats represents statistics on the current encode job
+	Stats struct {
+		Duration   int    `json:"duration"`
+		Percentage int    `json:"percentage"`
+		Frame      int    `json:"frame"`
+		FPS        int    `json:"fps"`
+		Bitrate    string `json:"bitrate"`
+		Size       string `json:"size"`
+		Time       string `json:"time"`
+	}
+)
 
 // DecodeToTask converts the b64 encoded task and converts it to the payload object
 func DecodeToTask(msg string, task interface{}) (err error) {
@@ -52,29 +65,37 @@ func EncodeVideo(b64payload string) error {
 	// of the video which is important to determine the ETA. so we'll just parsing
 	// the normal stdout.
 
-	oneByte := make([]byte, 8)
+	bytes := make([]byte, 100)
+	stats := &Stats{}
+	allRes := ""
+	start := time.Now()
 	for {
-		_, err := stdout.Read(oneByte)
+		_, err := stdout.Read(bytes)
 		if err != nil {
-			fmt.Printf(err.Error())
+			err = fmt.Errorf("failed to read stdout: %w", err)
 			break
 		}
-		allRes += string(oneByte)
-		getRatio(allRes)
+		allRes += string(bytes)
+		ok := getStats(allRes, stats)
+		if ok {
+			allRes = ""
+			log.Printf("%+v", stats)
+		}
 	}
 
 	err = cmd.Wait()
+	if err != nil {
+		return err
+	}
 
-	log.Println("finished encoding")
+	log.Printf("finished encoding %s/%s - completed in %s", payload.Src, payload.EncodeName, time.Since(start))
 
-	return err
+	return nil
 }
 
-var duration = 0
-var allRes = ""
-var lastPer = -1
-
 func durToSec(dur string) (sec int) {
+	// So we're kind of limiting our videos to 24h which isn't ideal
+	// shouldn't crash the application hopefully XD
 	durAry := strings.Split(dur, ":")
 	if len(durAry) != 3 {
 		return
@@ -87,7 +108,8 @@ func durToSec(dur string) (sec int) {
 	sec += second
 	return
 }
-func getRatio(res string) {
+func getStats(res string, s *Stats) bool {
+
 	durIdx := strings.Index(res, "Duration")
 	// Checking if we've got a "Duration",
 	// we need this so we can determine the ETA
@@ -97,54 +119,49 @@ func getRatio(res string) {
 		if len(dur) > 8 {
 			dur = dur[0:8]
 
-			duration = durToSec(dur)
-			fmt.Printf("duration: %d (%s)", duration, res)
-			allRes = ""
+			s.Duration = durToSec(dur)
+			return true
 		}
 	}
 	// FFmpeg should give us a duration on startup,
 	// so we kill here in the event that didn't happen.
-	if duration == 0 {
-		return
+	if s.Duration == 0 {
+		return false
 	}
-	// From this point on it should be outputting normal encode stdout,
-	// which we'll want to parse.
-	timeIdx := strings.Index(res, "time=")
-	// fpsIdx := strings.Index(res, "fps=")
-	// sizeIdx := strings.Index(res, "size=")
 
-	// strings.
+	frameIdx := strings.LastIndex(res, "frame=")
+	fpsIdx := strings.LastIndex(res, "fps=")
+	bitrateIdx := strings.LastIndex(res, "bitrate=")
+	sizeIdx := strings.LastIndex(res, "size=")
+	timeIdx := strings.Index(res, "time=")
 
 	if timeIdx >= 0 {
+		// From this point on it should be outputting normal encode stdout,
+		// which we'll want to parse.
 
+		frame := strings.Fields(res[frameIdx+6:])
+		fps := strings.Fields(res[fpsIdx+4:])
+		bitrate := strings.Fields(res[bitrateIdx+8:])
+		size := strings.Fields(res[sizeIdx+5:])
 		time := res[timeIdx+5:]
+
 		if len(time) > 8 {
 			time = time[0:8]
 			sec := durToSec(time)
-			per := (sec * 100) / duration
-			if lastPer != per {
-				lastPer = per
-				fmt.Printf("Percentage: %d (%s)", per, res)
+			per := (sec * 100) / s.Duration
+			if s.Percentage != per {
+				s.Percentage = per
+				// Just doing to reuse this int variable for each item
+				integer, _ := strconv.Atoi(frame[0])
+				s.Frame = integer
+				integer, _ = strconv.Atoi(fps[0])
+				s.FPS = integer
+				s.Bitrate = bitrate[0]
+				s.Size = size[0]
+				s.Time = time
 			}
-
-			allRes = ""
+			return true
 		}
 	}
-}
-
-func test() {
-	cmdName := "ffmpeg -i 1.mp4  -acodec aac -vcodec libx264  cmd1.mp4 2>&1"
-	cmd := exec.Command("sh", "-c", cmdName)
-	stdout, _ := cmd.StdoutPipe()
-	cmd.Start()
-	oneByte := make([]byte, 8)
-	for {
-		_, err := stdout.Read(oneByte)
-		if err != nil {
-			fmt.Printf(err.Error())
-			break
-		}
-		allRes += string(oneByte)
-		getRatio(allRes)
-	}
+	return false
 }
