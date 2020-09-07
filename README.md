@@ -6,14 +6,17 @@ A go service, with both worker / server configurations available that handles ba
 
 - Redis (global)
 - ffmpeg (worker)
-- postgres (at some point)
-- s3-like endpoint (at some point)
+- s3-like endpoint (worker)
 
-### Server `go run main.go server`
+### Server
+
+`go run main.go server`
 
 Runs a HTTP server listening on port `8082` accepting json encoded video encode requests at endpoint `/encode_video`.
 
-### Worker `go run main.go worker`
+### Worker
+
+`go run main.go worker`
 
 Will process video encode requests then copy the file over to the CDN.
 

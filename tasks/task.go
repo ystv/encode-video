@@ -5,12 +5,29 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 )
 
+// Store represents our CDN dependency
+type Store struct {
+	cdn *s3.S3
+}
+
+// NewStore creates our dependency
+func NewStore(cdn *s3.S3) *Store {
+	return &Store{cdn: cdn}
+}
+
+// Encoder structs
 type (
 	// Payload the object that is used to communicate in the MQ
 	Payload struct {
@@ -46,20 +63,58 @@ func DecodeToTask(msg string, task interface{}) (err error) {
 }
 
 // EncodeVideo encodes a video
-func EncodeVideo(b64payload string) error {
+func (m *Store) EncodeVideo(b64payload string) error {
+	// Unmarshaling payload
 	payload := Payload{}
 	err := DecodeToTask(b64payload, &payload)
 
+	// Download src
+	startDl := time.Now()
+	srcPath := strings.Split(payload.Src, "/")
+	srcFilename := strings.Join(srcPath[1:], "-")
+	dstPath := strings.Split(payload.Dst, "/")
+	dstFilename := strings.Join(dstPath[1:], "-")
+
+	file, err := os.Create(srcFilename)
+	if err != nil {
+		err = fmt.Errorf("faied to create temp source file: %w", err)
+		return err
+	}
+	defer file.Close()
+
+	sess, err := session.NewSession(&m.cdn.Config)
+	if err != nil {
+		err = fmt.Errorf("failed to create new cdn session: %w", err)
+		return err
+	}
+
+	downloader := s3manager.NewDownloader(sess)
+	numBytes, err := downloader.Download(file, &s3.GetObjectInput{
+		Bucket: aws.String(srcPath[0]),
+		Key:    aws.String(strings.Join(srcPath[1:], "/")),
+	})
+	if err != nil {
+		err = fmt.Errorf("failed to download file: %w", err)
+		return err
+	}
+	file.Close()
+	log.Printf("downloaded %d bytes in %s", numBytes, time.Since(startDl))
+
+	// Video encoding
 	log.Printf("encode video: %s/%s", payload.Src, payload.EncodeName)
 
-	cmdString := fmt.Sprintf("%s %s %s %s %s",
-		"ffmpeg -y -i", payload.Src, payload.EncodeArgs, payload.Dst, "2>&1")
+	cmdString := fmt.Sprintf("%s \"%s\" %s \"%s\" %s",
+		"ffmpeg -y -i", srcFilename, payload.EncodeArgs, dstFilename, "2>&1")
 
 	cmd := exec.Command("sh", "-c",
 		cmdString)
 
 	stdout, _ := cmd.StdoutPipe()
-	cmd.Start()
+	err = cmd.Start()
+	if err != nil {
+		err = fmt.Errorf("failed to start ffmpeg: %w", err)
+		return err
+	}
 
 	// We're not using the -progress flag since it doesn't give us the duration
 	// of the video which is important to determine the ETA. so we'll just parsing
@@ -68,12 +123,15 @@ func EncodeVideo(b64payload string) error {
 	bytes := make([]byte, 100)
 	stats := &Stats{}
 	allRes := ""
-	start := time.Now()
+	startEnc := time.Now()
 	for {
 		_, err := stdout.Read(bytes)
 		if err != nil {
+			if err.Error() == "EOF" {
+				break
+			}
 			err = fmt.Errorf("failed to read stdout: %w", err)
-			break
+			return err
 		}
 		allRes += string(bytes)
 		ok := getStats(allRes, stats)
@@ -88,7 +146,46 @@ func EncodeVideo(b64payload string) error {
 		return err
 	}
 
-	log.Printf("finished encoding %s/%s - completed in %s", payload.Src, payload.EncodeName, time.Since(start))
+	log.Printf("finished encoding %s/%s - completed in %s", payload.Src, payload.EncodeName, time.Since(startEnc))
+
+	// Deleting local source file
+	err = os.Remove(srcFilename)
+	if err != nil {
+		err = fmt.Errorf("failed to delete source file: %w", err)
+		return err
+	}
+
+	startUp := time.Now()
+
+	// Uploading encoded file
+	file, err = os.Open(dstFilename)
+	if err != nil {
+		err = fmt.Errorf("failed to open encoded file: %w", err)
+		return err
+	}
+	defer file.Close()
+	uploader := s3manager.NewUploader(sess)
+	upload, err := uploader.Upload(&s3manager.UploadInput{
+		Bucket: aws.String(dstPath[0]),
+		Key:    aws.String(strings.Join(dstPath[1:], "/")),
+		Body:   file,
+	})
+	if err != nil {
+		err = fmt.Errorf("failed to upload encoded file: %w", err)
+		return err
+	}
+	file.Close()
+
+	log.Printf("finished uploading %s/%s to %s - completed in %s", payload.Src, payload.EncodeName, upload.Location, time.Since(startUp))
+
+	// Deleting local encoded file
+	err = os.Remove(dstFilename)
+	if err != nil {
+		err = fmt.Errorf("failed to delete source file: %w", err)
+		return err
+	}
+
+	log.Printf("Finished encoding %s/%s - completed in %s", payload.Src, payload.EncodeName, time.Since(startDl))
 
 	return nil
 }
